@@ -1,0 +1,14 @@
+[package]
+name = "algx"
+version = "0.1.0"
+authors = ["Urho Laukkarinen <urho.laukkarinen@gmail.com>"]
+edition = "2021"
+
+license-file = "LICENSE"
+readme = "README.md"
+
+description = "Implementation of Knuth's Algorithm X"
+homepage = "https://github.com/urholaukkarinen/algx"
+repository = "https://github.com/urholaukkarinen/algx"
+keywords = ["exact-cover", "dancing-links", "algorithm", "sudoku"]
+categories = ["algorithms"]
