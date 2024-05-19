@@ -2,6 +2,41 @@
 
 use algx::Solver;
 
+fn main() {
+    let rows = create_sudoku_exact_cover();
+
+    let solver = Solver::new(rows, vec![]);
+
+    for (i, solution) in solver.enumerate() {
+        let mut sudoku: [[u8; 9]; 9] = Default::default();
+        for (x, y, num) in solution.into_iter().map(x_y_num_from_row_index) {
+            sudoku[y][x] = num as u8;
+        }
+
+        println!("-------------------------");
+        for rows in sudoku.chunks(3) {
+            for row in rows {
+                for col in row.chunks(3) {
+                    print!("| ");
+                    for num in col {
+                        print!("{} ", num);
+                    }
+                }
+                println!("|");
+            }
+            println!("-------------------------");
+        }
+
+        println!();
+
+        if i == 0 {
+            println!("Press enter to show the next solution");
+        }
+
+        std::io::stdin().read_line(&mut String::new()).ok();
+    }
+}
+
 fn create_sudoku_exact_cover_row(y: &usize, x: &usize, num: &usize) -> [usize; 4] {
     [
         y * 9 + x,
@@ -30,33 +65,4 @@ fn x_y_num_from_row_index(i: usize) -> (usize, usize, usize) {
     let x = i / (9 * 9);
 
     (x, y, num)
-}
-
-fn main() {
-    let rows = create_sudoku_exact_cover();
-
-    let solver = Solver::new(rows, vec![]);
-
-    for solution in solver.skip(1).take(1) {
-        let mut sudoku: [[u8; 9]; 9] = Default::default();
-        for (x, y, num) in solution.into_iter().map(x_y_num_from_row_index) {
-            sudoku[y][x] = num as u8;
-        }
-
-        println!("-------------------------");
-        for rows in sudoku.chunks(3) {
-            for row in rows {
-                for col in row.chunks(3) {
-                    print!("| ");
-                    for num in col {
-                        print!("{} ", num);
-                    }
-                }
-                println!("|");
-            }
-            println!("-------------------------");
-        }
-
-        println!();
-    }
 }
