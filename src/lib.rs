@@ -1,215 +1,266 @@
-///! Implementation of [https://en.wikipedia.org/wiki/Knuth%27s_Algorithm_X](Knuth's Algorithm X)
-///! for solving the [https://en.wikipedia.org/wiki/Exact_cover](exact cover) problem.
-///!
-///!
-use std::{collections::BTreeMap, ops::Deref, ops::DerefMut, pin::Pin, ptr::null_mut};
+//! Implementation of [Knuth's Algorithm X](https://en.wikipedia.org/wiki/Knuth%27s_Algorithm_X)
+//! for solving the [exact cover](https://en.wikipedia.org/wiki/Exact_cover) problem.
+//!
+mod node;
+#[cfg(target_arch = "wasm32")]
+mod wasm;
 
-#[derive(Copy, Clone, PartialEq, Eq, Hash)]
-struct NodeRef {
-    inner: *mut Node,
+use node::{Node, NodeId};
+
+use std::collections::BTreeMap;
+
+#[derive(Default, Debug, Clone)]
+struct SolverState {
+    nodes: Vec<Node>,
+    header: NodeId,
+    column_sizes: Vec<usize>,
 }
 
-impl NodeRef {
-    fn new(inner: *mut Node) -> Self {
-        Self { inner }
+impl SolverState {
+    fn new_node(&mut self) -> NodeId {
+        self.nodes.push(Node::default());
+        NodeId::new(self.nodes.len() - 1)
     }
 
-    fn invalid() -> Self {
-        Self { inner: null_mut() }
+    fn link_horizontal(&mut self, left_id: NodeId, right_id: NodeId) {
+        let left = self.node_mut(left_id);
+        left.right = right_id;
+
+        let right = self.node_mut(right_id);
+        right.left = left_id;
     }
 
-    fn is_valid(&self) -> bool {
-        !self.inner.is_null()
+    fn detach_column(&mut self, node_id: NodeId) {
+        let node = self.node(node_id);
+        let header = self.node(node.header);
+
+        let header_left_id = header.left;
+        let header_right_id = header.right;
+
+        let header_left = self.node_mut(header_left_id);
+        header_left.right = header_right_id;
+
+        let header_right = self.node_mut(header_right_id);
+        header_right.left = header_left_id;
     }
-}
 
-impl Deref for NodeRef {
-    type Target = Node;
+    fn attach_column(&mut self, node_id: NodeId) {
+        let node = self.node_mut(node_id);
+        let header_id = node.header;
 
-    fn deref(&self) -> &Self::Target {
-        if cfg!(debug_assertions) && !self.is_valid() {
-            panic!("Tried to access invalid node!");
+        let header = self.node_mut(header_id);
+        let header_left_id = header.left;
+        let header_right_id = header.right;
+
+        let header_left = self.node_mut(header_left_id);
+        header_left.right = header_id;
+
+        let header_right = self.node_mut(header_right_id);
+        header_right.left = header_id;
+    }
+
+    fn detach_row(&mut self, node_id: NodeId) {
+        let mut current_id = self.node_mut(node_id).right;
+
+        loop {
+            if current_id == node_id {
+                break;
+            }
+
+            let current_node = self.node_mut(current_id);
+            let current_col_idx = current_node.col;
+            let current_down_id = current_node.down;
+            let current_up_id = current_node.up;
+            let current_right_id = current_node.right;
+
+            self.node_mut(current_up_id).down = current_down_id;
+            self.node_mut(current_down_id).up = current_up_id;
+
+            self.column_sizes[current_col_idx] -= 1;
+
+            current_id = current_right_id;
         }
-
-        unsafe { &*self.inner }
     }
-}
 
-impl DerefMut for NodeRef {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        if cfg!(debug_assertions) && !self.is_valid() {
-            panic!("Tried to access invalid node!");
+    fn attach_row(&mut self, node_id: NodeId) {
+        let mut current_id = self.node_mut(node_id).left;
+
+        loop {
+            if current_id == node_id {
+                break;
+            }
+
+            let current_node = self.node_mut(current_id);
+            let current_col_idx = current_node.col;
+            let current_down_id = current_node.down;
+            let current_left_id = current_node.left;
+            let current_up_id = current_node.up;
+
+            self.column_sizes[current_col_idx] += 1;
+
+            self.node_mut(current_down_id).up = current_id;
+            self.node_mut(current_up_id).down = current_id;
+
+            current_id = current_left_id;
         }
+    }
 
-        unsafe { &mut *self.inner }
+    fn node_column_size(&self, id: NodeId) -> usize {
+        self.column_sizes[self.node(id).col]
+    }
+
+    fn node(&self, id: NodeId) -> &Node {
+        &self.nodes[id.value()]
+    }
+
+    fn node_mut(&mut self, id: NodeId) -> &mut Node {
+        &mut self.nodes[id.value()]
+    }
+
+    fn header_node_mut(&mut self, id: NodeId) -> &mut Node {
+        let header_node_id = self.node_mut(id).header;
+
+        self.node_mut(header_node_id)
     }
 }
 
-pub struct Node {
-    left: NodeRef,
-    right: NodeRef,
-    up: NodeRef,
-    down: NodeRef,
-    header: NodeRef,
-
-    row: isize,
-    col: usize,
-}
-
-impl Node {
-    fn new() -> Pin<Box<Self>> {
-        let mut node = Box::pin(Node {
-            left: NodeRef::invalid(),
-            right: NodeRef::invalid(),
-            up: NodeRef::invalid(),
-            down: NodeRef::invalid(),
-            header: NodeRef::invalid(),
-            row: 0,
-            col: 0,
-        });
-
-        let ptr = node.to_ptr();
-        node.left = ptr;
-        node.right = ptr;
-        node.up = ptr;
-        node.down = ptr;
-        node.header = ptr;
-        node
-    }
-
-    fn to_ptr(self: &Pin<Box<Self>>) -> NodeRef {
-        NodeRef::new(self.as_ref().deref() as *const Self as *mut Self)
-    }
-}
-
+#[derive(Debug, Copy, Clone)]
 struct Step {
-    node: NodeRef,
+    node_id: NodeId,
     backtracking: bool,
 }
 
+#[derive(Debug, Default, Clone)]
 pub struct Solver {
-    _nodes: Vec<Pin<Box<Node>>>,
-    header: NodeRef,
-
-    column_sizes: Vec<usize>,
+    state: SolverState,
     step_stack: Vec<Step>,
     partial_solution: Vec<usize>,
 }
 
 impl Solver {
-    /// Creates a new solver for given rows.
-    /// Columns in the rows are assumed to be in ascending order
+    /// Creates a new solver for given rows. Columns in the rows are assumed to be in ascending order
     pub fn new(rows: Vec<Vec<usize>>, partial_solution: Vec<usize>) -> Self {
         let column_count = rows.iter().flatten().copied().max().unwrap_or_default() + 1;
 
-        let mut header_row: Vec<NodeRef> = vec![];
-        let mut nodes: Vec<Pin<Box<Node>>> = vec![];
+        let mut state = SolverState {
+            nodes: vec![],
+            header: Default::default(),
+            column_sizes: vec![0; column_count],
+        };
 
-        let mut above_nodes = vec![NodeRef::invalid(); column_count];
+        let mut header_row: Vec<NodeId> = vec![];
 
-        let mut column_sizes = vec![0; column_count];
+        let mut above_nodes = vec![NodeId::invalid(); column_count];
 
         let mut columns_to_cover = BTreeMap::new();
 
         for (row_idx, row) in rows.into_iter().enumerate() {
-            let mut first = NodeRef::invalid();
-            let mut prev = NodeRef::invalid();
+            let mut first = NodeId::invalid();
+            let mut prev = NodeId::invalid();
 
             for col_idx in row {
-                let mut node = Node::new();
-                node.row = row_idx as isize;
-                node.col = col_idx;
+                let node_id = state.new_node();
 
-                column_sizes[col_idx] += 1;
+                state.node_mut(node_id).row = row_idx as isize;
+                state.node_mut(node_id).col = col_idx;
 
-                let node_ptr = node.to_ptr();
+                state.column_sizes[col_idx] += 1;
 
                 if !first.is_valid() {
-                    first = node_ptr;
+                    first = node_id;
                 }
 
                 if prev.is_valid() {
-                    link_horizontal(prev, node_ptr);
+                    state.link_horizontal(prev, node_id);
                 }
 
-                let above = &mut above_nodes[col_idx];
-                if above.is_valid() {
-                    node.up = *above;
-                    node.down = above.down;
-                    node.header = above.header;
-                    node.header.up = node_ptr;
-                    above.down = node_ptr;
+                let above_id = above_nodes[col_idx];
+                if above_id.is_valid() {
+                    let above_node = state.node_mut(above_id);
+                    let above_down_id = above_node.down;
+                    let above_header_id = above_node.header;
+
+                    above_node.down = node_id;
+
+                    let node = state.node_mut(node_id);
+                    node.up = above_id;
+                    node.down = above_down_id;
+                    node.header = above_header_id;
+
+                    state.header_node_mut(node_id).up = node_id;
                 } else {
-                    let mut header_node = Node::new();
-                    header_node.row = -1;
-                    header_node.col = col_idx;
+                    let header_id = state.new_node();
+                    header_row.push(header_id);
 
-                    let header_ptr = header_node.to_ptr();
-                    header_row.push(header_ptr);
+                    let header = state.node_mut(header_id);
+                    header.row = -1;
+                    header.col = col_idx;
+                    header.header = header_id;
+                    header.up = node_id;
+                    header.down = node_id;
 
-                    header_node.header = header_ptr;
-                    header_node.up = node_ptr;
-                    header_node.down = node_ptr;
-                    node.up = header_ptr;
-                    node.down = header_ptr;
-                    node.header = header_ptr;
-
-                    nodes.push(header_node);
+                    let node = state.node_mut(node_id);
+                    node.up = header_id;
+                    node.down = header_id;
+                    node.header = header_id;
                 }
 
-                above_nodes[col_idx] = node_ptr;
-                prev = node_ptr;
+                above_nodes[col_idx] = node_id;
+                prev = node_id;
 
-                if partial_solution.contains(&col_idx) && !columns_to_cover.contains_key(&node.col)
-                {
-                    columns_to_cover.insert(node.col, node_ptr);
+                if partial_solution.contains(&col_idx) && !columns_to_cover.contains_key(&col_idx) {
+                    columns_to_cover.insert(col_idx, node_id);
                 }
-
-                nodes.push(node);
             }
 
             if first.is_valid() && prev.is_valid() {
-                link_horizontal(prev, first);
+                state.link_horizontal(prev, first);
             }
         }
 
-        header_row.sort_by(|a, b| a.col.cmp(&b.col));
-        let mut first_header = header_row.iter().next().copied().unwrap();
-        let mut last_header = header_row.iter().last().copied().unwrap();
-        first_header.left = last_header;
-        last_header.right = first_header;
+        header_row.sort_by(|a, b| {
+            let a_col = state.node_mut(*a).col;
+            let b_col = state.node_mut(*b).col;
+            a_col.cmp(&b_col)
+        });
 
-        header_row
-            .windows(2)
-            .for_each(|nodes| link_horizontal(nodes[0], nodes[1]));
+        let Some(first_header_id) = header_row.first().copied() else {
+            return Default::default();
+        };
 
-        let mut header_root = Node::new();
-        let header_root_ptr = header_root.to_ptr();
+        let last_header_id = header_row.iter().last().copied().unwrap_or(first_header_id);
 
-        header_root.right = first_header;
-        first_header.left = header_root_ptr;
+        state.node_mut(first_header_id).left = last_header_id;
+        state.node_mut(last_header_id).right = first_header_id;
 
-        header_root.left = last_header;
-        last_header.right = header_root_ptr;
+        header_row.windows(2).for_each(|nodes| {
+            state.link_horizontal(nodes[0], nodes[1]);
+        });
 
-        nodes.push(header_root);
+        let header_root_id = state.new_node();
+
+        state.node_mut(header_root_id).right = first_header_id;
+        state.node_mut(first_header_id).left = header_root_id;
+
+        state.node_mut(header_root_id).left = last_header_id;
+        state.node_mut(last_header_id).right = header_root_id;
+
+        state.header = header_root_id;
 
         let mut solver = Self {
-            _nodes: nodes,
-            header: header_root_ptr,
+            state: state.clone(),
             partial_solution: Vec::with_capacity(header_row.len()),
-            column_sizes,
             step_stack: vec![],
         };
 
-        for node in columns_to_cover.values() {
-            let node = node.header.down;
-            solver.cover(node);
+        for column_node_id in columns_to_cover.values() {
+            let column_first_node_id = state.header_node_mut(*column_node_id).down;
+            solver.cover(column_first_node_id);
         }
 
-        if let Some(node) = solver.choose_column() {
+        if let Some(node_id) = solver.choose_column() {
             solver.step_stack.push(Step {
-                node,
+                node_id,
                 backtracking: false,
             });
         }
@@ -217,163 +268,136 @@ impl Solver {
         solver
     }
 
+    fn choose_column(&self) -> Option<NodeId> {
+        let mut best_column_id = None;
+        let mut best_size = usize::MAX;
+
+        let mut current_node_id = self.state.node(self.state.header).right;
+
+        while current_node_id != self.state.header {
+            let current_size = self.state.node_column_size(current_node_id);
+
+            if current_size < best_size {
+                best_column_id = Some(current_node_id);
+                best_size = current_size;
+            }
+            current_node_id = self.state.node(current_node_id).right;
+        }
+
+        Some(self.state.node(best_column_id?).down)
+    }
+
+    pub fn partial_solution(&self) -> &[usize] {
+        &self.partial_solution
+    }
+
     pub fn is_completed(&self) -> bool {
         self.step_stack.is_empty()
     }
 
-    fn choose_column(&self) -> Option<NodeRef> {
-        let mut best_column = None;
-        let mut best_size = usize::MAX;
+    fn cover(&mut self, node_id: NodeId) {
+        self.state.detach_column(node_id);
 
-        let mut current_node = self.header.right;
+        let node = self.state.node_mut(node_id);
+        let node_header_id = node.header;
 
-        while current_node != self.header {
-            let current_size = self.column_sizes[current_node.col];
-            if current_size < best_size {
-                best_column = Some(current_node);
-                best_size = current_size;
-            }
-            current_node = current_node.right;
+        let mut down_id = self.state.node_mut(node_header_id).down;
+        while down_id != node_header_id {
+            self.state.detach_row(down_id);
+
+            down_id = self.state.node_mut(down_id).down;
+        }
+    }
+
+    fn uncover(&mut self, node_id: NodeId) {
+        let node_header_id = self.state.node(node_id).header;
+        let mut up_id = self.state.node(node_header_id).up;
+
+        while up_id != node_header_id {
+            self.state.attach_row(up_id);
+            up_id = self.state.node(up_id).up;
         }
 
-        best_column.map(|node| node.down)
+        self.state.attach_column(node_id);
     }
 
     pub fn step(&mut self) -> Option<Vec<usize>> {
-        let Some(Step { node, backtracking }) = self.step_stack.pop() else {
-            return None;
-        };
+        let Step {
+            node_id,
+            backtracking,
+        } = self.step_stack.pop()?;
 
-        if node == node.header {
+        let node_header_id = self.state.node(node_id).header;
+
+        if node_id == node_header_id {
             return None;
         }
 
         if backtracking {
-            self.step_backward(node);
+            self.step_backward(node_id);
         } else {
-            self.step_forward(node);
+            self.step_forward(node_id);
         }
 
-        if self.header.right == self.header {
+        let header_root_id = self.state.header;
+
+        if self.state.node_mut(header_root_id).right == header_root_id {
             Some(self.partial_solution.clone())
         } else {
             None
         }
     }
 
-    fn step_forward(&mut self, node: NodeRef) {
-        self.partial_solution.push(node.row as _);
+    fn step_forward(&mut self, node_id: NodeId) {
+        let node_row = self.state.node(node_id).row;
+        self.partial_solution.push(node_row as _);
 
-        let mut current = node;
+        let mut current_id = node_id;
         loop {
-            self.cover(current);
+            self.cover(current_id);
 
-            current = current.right;
-            if current == node {
+            current_id = self.state.node(current_id).right;
+            if current_id == node_id {
                 break;
             }
         }
 
         self.step_stack.push(Step {
-            node,
+            node_id,
             backtracking: true,
         });
 
-        if let Some(node) = self.choose_column() {
+        if let Some(node_id) = self.choose_column() {
             self.step_stack.push(Step {
-                node,
+                node_id,
                 backtracking: false,
             });
         }
     }
 
-    fn step_backward(&mut self, node: NodeRef) {
+    fn step_backward(&mut self, node_id: NodeId) {
         self.partial_solution.pop();
 
-        let mut current = node.left;
+        let mut current_id = self.state.node(node_id).left;
         loop {
-            self.uncover(current);
+            self.uncover(current_id);
 
-            if current == node {
+            if current_id == node_id {
                 break;
             }
-            current = current.left;
+            current_id = self.state.node(current_id).left;
         }
 
-        if node.down != node.header {
+        let node_down = self.state.node(node_id).down;
+        let node_header = self.state.node(node_id).header;
+
+        if node_down != node_header {
             self.step_stack.push(Step {
-                node: node.down,
+                node_id: node_down,
                 backtracking: false,
             });
         }
     }
-
-    fn cover(&mut self, node: NodeRef) {
-        self.detach_column(node);
-
-        let mut down = node.header.down;
-        while down != node.header {
-            self.detach_row(down);
-            down = down.down;
-        }
-    }
-
-    fn uncover(&mut self, node: NodeRef) {
-        let mut up = node.header.up;
-        while up != node.header {
-            self.attach_row(up);
-            up = up.up;
-        }
-
-        self.attach_column(node);
-    }
-
-    fn detach_row(&mut self, node: NodeRef) {
-        let mut current = node.right;
-
-        loop {
-            if current == node {
-                break;
-            }
-
-            self.column_sizes[current.col] -= 1;
-            current.up.down = current.down;
-            current.down.up = current.up;
-
-            current = current.right;
-        }
-    }
-
-    fn attach_row(&mut self, node: NodeRef) {
-        let mut current = node.left;
-
-        loop {
-            if current == node {
-                break;
-            }
-
-            self.column_sizes[current.col] += 1;
-            current.down.up = current;
-            current.up.down = current;
-
-            current = current.left;
-        }
-    }
-
-    fn detach_column(&self, mut node: NodeRef) {
-        node.header.left.right = node.header.right;
-        node.header.right.left = node.header.left;
-    }
-
-    fn attach_column(&self, mut node: NodeRef) {
-        node.header.left.right = node.header;
-        node.header.right.left = node.header;
-    }
-}
-
-fn link_horizontal(mut left: NodeRef, mut right: NodeRef) {
-    left.right = right;
-    right.left = left;
 }
 
 impl Iterator for Solver {

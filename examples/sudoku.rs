@@ -1,3 +1,5 @@
+#![allow(clippy::print_stdout)]
+
 use algx::Solver;
 
 fn create_sudoku_exact_cover_row(y: &usize, x: &usize, num: &usize) -> [usize; 4] {
@@ -23,7 +25,7 @@ fn create_sudoku_exact_cover() -> Vec<Vec<usize>> {
 }
 
 fn x_y_num_from_row_index(i: usize) -> (usize, usize, usize) {
-    let num = i % 9;
+    let num = i % 9 + 1;
     let y = (i / 9) % 9;
     let x = i / (9 * 9);
 
@@ -35,17 +37,24 @@ fn main() {
 
     let solver = Solver::new(rows, vec![]);
 
-    for solution in solver.take(1) {
+    for solution in solver.skip(1).take(1) {
         let mut sudoku: [[u8; 9]; 9] = Default::default();
         for (x, y, num) in solution.into_iter().map(x_y_num_from_row_index) {
             sudoku[y][x] = num as u8;
         }
 
-        for row in sudoku {
-            for num in row {
-                print!("{} ", num);
+        println!("-------------------------");
+        for rows in sudoku.chunks(3) {
+            for row in rows {
+                for col in row.chunks(3) {
+                    print!("| ");
+                    for num in col {
+                        print!("{} ", num);
+                    }
+                }
+                println!("|");
             }
-            println!();
+            println!("-------------------------");
         }
 
         println!();
